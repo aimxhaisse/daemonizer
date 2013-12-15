@@ -95,7 +95,7 @@ void jail(char *dest)
     }
 }
 
-void run(char *argv[], char *pidfile)
+void run(char *argv[], char *env[], char *pidfile)
 {
     char pidstr[32], *pidpos;
     int fd, to_write, ret;
@@ -123,14 +123,14 @@ void run(char *argv[], char *pidfile)
         to_write -= ret;
     }
 
-    if (execve(argv[0], argv, NULL) == -1) {
+    if (execve(argv[0], argv, env) == -1) {
         unlink(pidfile);
         fprintf(stderr, "Unable to exec command %s: %s\n", argv[0], strerror(errno));
         exit(EXIT_FAILURE);
     }
 }
 
-int main(int argc, char *argv[])
+int main(int argc, char *argv[], char *env[])
 {
     char *user = NULL;
     char *dir = NULL;
@@ -200,7 +200,7 @@ int main(int argc, char *argv[])
         daemonize();
     }
 
-    run(argv, pidfile);
+    run(argv, env, pidfile);
 
     exit(EXIT_SUCCESS);
 }
