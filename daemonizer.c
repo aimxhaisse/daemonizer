@@ -12,7 +12,7 @@
 #include <pwd.h>
 
 /*
- * Since GO isn't able to daemonize for now (because of potential
+ * Since Go isn't able to daemonize for now (because of potential
  * threading issues), we need to daemonize from another program.
  * start-stop-daemon is a good answer, unfortunately it's not
  * available everywhere and implementations are different from one
@@ -24,7 +24,6 @@ void usage(char *progname);
 void daemonize()
 {
     int pid;
-    int i;
 
     /* let the parent die so we become orphan */
     pid = fork();
@@ -40,16 +39,6 @@ void daemonize()
     if (setsid() == -1) {
         fprintf(stderr, "Unable to get a new session id: %s\n", strerror(errno));
         exit(EXIT_FAILURE);
-    }
-
-    /* get rid of open descriptors and redirect standard ones to dev null */
-    for (i = getdtablesize(); i >= 0; --i) {
-        close(i);
-    }
-    i = open("/dev/null", O_RDWR);
-    if (i != -1) {
-        dup(i);
-        dup(i);
     }
 }
 
@@ -71,6 +60,50 @@ uid_t get_uid_for_user(char *user)
     return pw_user->pw_uid;
 }
 
+int redirect_outputs(char *path_stdin, char *path_stdout, char *path_stderr)
+{
+    int fdin;
+    int fdout;
+    int fderr;
+
+    /* looks complicated but attempts to always print something on error */
+
+    if (path_stdin) {
+	fdin = open(path_stdin, O_RDONLY | O_CREAT, 0644);
+	if (fdin == -1) {
+	    fprintf(stderr, "Unable to open stdin %s: %s\n", path_stdin, strerror(errno));
+	    exit(EXIT_FAILURE);
+	    return -1;
+	}
+	close(0);
+	dup(fdin);
+    }
+
+    if (path_stdout) {
+	fdout = open(path_stdout, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (fdout == -1) {
+	    fprintf(stderr, "Unable to open stdin %s: %s\n", path_stdout, strerror(errno));
+	    exit(EXIT_FAILURE);
+	    return -1;
+	}
+	close(1);
+	dup(fdout);
+    }
+
+    if (path_stderr) {
+	fderr = open(path_stderr, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (fderr == -1) {
+	    fprintf(stderr, "Unable to open stdin %s: %s\n", path_stderr, strerror(errno));
+	    exit(EXIT_FAILURE);
+	    return -1;
+	}
+	close(2);
+	dup(fderr);
+    }
+
+    return 0;
+}
+
 void mutate(uid_t uid)
 {
     /* do not mutate in what we already are */
@@ -84,10 +117,6 @@ void mutate(uid_t uid)
 
 void jail(char *dest)
 {
-    if (!dest) {
-        return;
-    }
-
     /* at this point, we have already chdired to dest */
     if (chroot(".") == -1) {
         fprintf(stderr, "Unable to chroot to %s: %s\n", dest, strerror(errno));
@@ -100,27 +129,29 @@ void run(char *argv[], char *env[], char *pidfile)
     char pidstr[32], *pidpos;
     int fd, to_write, ret;
 
-    fd = open(pidfile, O_CREAT | O_RDWR, 0640);
-    if (fd == -1) {
-        fprintf(stderr, "Unable to open pidfile %s: %s\n", pidfile, strerror(errno));
-        exit(EXIT_FAILURE);
-    }
-    if (lockf(fd, F_TLOCK, 0) == -1) {
-        fprintf(stderr, "Unable to lock pidfile %s: %s\n", pidfile, strerror(errno));
-        exit(EXIT_FAILURE);
-    }
+    if (pidfile != NULL) {
+	fd = open(pidfile, O_CREAT | O_RDWR, 0640);
+	if (fd == -1) {
+	    fprintf(stderr, "Unable to open pidfile %s: %s\n", pidfile, strerror(errno));
+	    exit(EXIT_FAILURE);
+	}
+	if (lockf(fd, F_TLOCK, 0) == -1) {
+	    fprintf(stderr, "Unable to lock pidfile %s: %s\n", pidfile, strerror(errno));
+	    exit(EXIT_FAILURE);
+	}
 
-    /* write pid to pidfile */
-    to_write = snprintf(pidstr, sizeof(pidstr), "%d\n", getpid());
-    pidpos = pidstr;
-    while (to_write > 0) {
-        ret = write(fd, pidpos, to_write);
-        if (ret == -1) {
-            fprintf(stderr, "Unable to write pid to pidfile %s: %s\n", pidfile, strerror(errno));
-            exit(EXIT_FAILURE);
-        }
-        pidpos += ret;
-        to_write -= ret;
+	/* write pid to pidfile */
+	to_write = snprintf(pidstr, sizeof(pidstr), "%d\n", getpid());
+	pidpos = pidstr;
+	while (to_write > 0) {
+	    ret = write(fd, pidpos, to_write);
+	    if (ret == -1) {
+		fprintf(stderr, "Unable to write pid to pidfile %s: %s\n", pidfile, strerror(errno));
+		exit(EXIT_FAILURE);
+	    }
+	    pidpos += ret;
+	    to_write -= ret;
+	}
     }
 
     if (execve(argv[0], argv, env) == -1) {
@@ -135,13 +166,16 @@ int main(int argc, char *argv[], char *env[])
     char *user = NULL;
     char *dir = NULL;
     char *pidfile = NULL;
+    char *path_stdin = NULL;
+    char *path_stderr = NULL;
+    char *path_stdout = NULL;
     char *progname = argv[0];
     int has_jail_opt = 0;
     int has_debug_opt = 0;
     int opt;
     uid_t uid;
 
-    while ((opt = getopt(argc, argv, "djp:u:c:")) != -1) {
+    while ((opt = getopt(argc, argv, "djp:u:c:i:o:e:")) != -1) {
         switch (opt) {
         case 'u':
             user = optarg;
@@ -163,13 +197,25 @@ int main(int argc, char *argv[], char *env[])
             has_jail_opt = 1;
             break;
 
+	case 'i':
+	    path_stdin = optarg;
+	    break;
+
+	case 'o':
+	    path_stdout = optarg;
+	    break;
+
+	case 'e':
+	    path_stderr = optarg;
+	    break;
+
         default:
             usage(progname);
             /* NEVER REACHED */
         }
     }
 
-    if (!pidfile || (has_jail_opt && !dir)) {
+    if (has_jail_opt && !dir) {
         usage(progname);
     }
 
@@ -194,6 +240,8 @@ int main(int argc, char *argv[], char *env[])
         jail(dir);
     }
 
+    redirect_outputs(path_stdin, path_stdout, path_stderr);
+
     mutate(uid);
 
     if (!has_debug_opt) {
@@ -208,9 +256,12 @@ int main(int argc, char *argv[], char *env[])
 void usage(char *progname)
 {
     fprintf(stderr,
-            "Usage : %s -p PIDFILE [-d] [-j] [-u USER] [-c CHDIR] -- COMMAND [ARGS]\n"
+            "Usage : %s [-p PIDFILE] [-i STDIN] [-o STDOUT] [-e STDERR] [-d] [-j] [-u USER] [-c CHDIR] -- COMMAND [ARGS]\n"
             "\n"
             "-p\t\tuse PIDFILE (relative to CHDIR) as a lock file in which the PID of COMMAND is written\n"
+	    "-i\t\tuse FILE as stdin\n"
+	    "-o\t\tuse FILE as stdout\n"
+	    "-e\t\tuse FILE as stderr\n"
             "-d\t\tdebug mode, do not daemonize to print errors\n"
             "-j\t\tjail the command with chroot, has *no* effect if you aren't root\n"
             "-u\t\texecute COMMAND as USER\n"

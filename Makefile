@@ -1,3 +1,5 @@
+CFLAGS=-W -Wall -Werror
+
 all: daemonizer
 
 daemonizer: daemonizer.o
